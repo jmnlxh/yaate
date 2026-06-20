@@ -1,0 +1,22 @@
+# Environment — NEVER commit this
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Nix
+.direnv/
+result
+
+# Editor
+*.swp
+*.swo
+.DS_Store
