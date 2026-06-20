@@ -442,7 +442,7 @@ class Editor:
 
         async def delayed_smell():
             try:
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(10.0)
                 import threading
                 threading.Thread(target=self._do_smell_detect, daemon=True).start()
             except asyncio.CancelledError:
@@ -509,8 +509,17 @@ class Editor:
 
     def _do_autocomplete(self):
         try:
+            doc = self.buffer.document
+            row = doc.cursor_position_row
+            line = doc.lines[row]
+
+            # Optimize API usage: Only trigger if at the end of a non-empty line
+            if not line.strip() or doc.cursor_position_col < len(line):
+                self.ghost_text = ""
+                self._refresh()
+                return
+
             lines = self._file_lines()
-            row = self._current_line_index()
             suggestion = ai.autocomplete(lines, row, self.mode)
             self.ghost_text = suggestion
             self._refresh()
