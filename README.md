@@ -1,6 +1,6 @@
 # yaate — Yet Another AI-assisted Text Editor
 
-A lightweight terminal editor powered by Gemini 1.5 Flash. Call it like `nano` or `vim`.
+A lightweight terminal editor powered by Gemini AI. Call it like `nano` or `vim`.
 
 ```bash
 yaate file.py
@@ -17,12 +17,13 @@ yaate /etc/nginx/nginx.conf
 | `Ctrl+W` | Find (Where Is) |
 | `Ctrl+_` | Go To Line |
 | `(Automatic)` | AI autocomplete as you type — Tab accept, Esc dismiss |
-| `Ctrl+/` | AI-Comment current line with explanation |
-| `Ctrl+E` | AI-Explain error on current line |
-| `(Automatic)` | AI-Analyze file — code smell detector with gutter markers as you type |
+| `Ctrl+T` | AI-Comment current line with explanation |
+| `Ctrl+E` | AI-Explain code or error on current line |
+| `(Automatic)` | AI-Analyze file — code smell detector with inline markers as you type |
 | `Ctrl+F` | AI-Format file (local formatter → Gemini fallback) |
 | `Ctrl+D` | AI-Generate docstring for current function |
 | `Ctrl+C` | Toggle AI-Chat panel |
+| `Ctrl+Y` | Yank (insert) the last AI Chat response directly into your code |
 
 ## Config Recognizer
 
@@ -39,24 +40,33 @@ file.py              → python
 
 ## Install
 
-### Standard (pip)
+### NixOS / Linux (Recommended)
+You can build the native executable using the Nix flake:
 ```bash
 git clone https://github.com/jmnlxh/yaate
 cd yaate
-pip install -e .
-cp .env.example .env
-# add your GEMINI_API_KEY to .env
-yaate file.py
+nix build
+./result/bin/yaate file.py
 ```
-
-### NixOS (flake devShell)
+Or run a development shell:
 ```bash
 nix develop
 yaate file.py
 ```
 
-### NixOS (system package)
-Add to your `flake.nix` inputs and `environment.systemPackages`.
+### Windows & Cross-Platform (pip)
+Because `yaate` is built entirely in Python using `prompt_toolkit`, it is 100% cross-platform. It works flawlessly in Windows CMD, PowerShell, Windows Terminal, macOS, or any Linux distro.
+```bash
+git clone https://github.com/jmnlxh/yaate
+cd yaate
+pip install .
+
+# Setup your API key
+copy .env.example .env
+# Edit .env and add your GEMINI_API_KEY
+
+yaate file.py
+```
 
 ## Requirements
 
@@ -66,7 +76,7 @@ Add to your `flake.nix` inputs and `environment.systemPackages`.
 
 ## Token Usage
 
-All features use `gemini-1.5-flash` — the free tier gives 1M tokens/day.
+All features dynamically fetch the best available Gemini model linked to your API key (defaulting to `gemini-1.5-flash` or `gemini-pro`). The free tier gives 1M tokens/day.
 
 | Feature | ~Tokens per call |
 |---|---|

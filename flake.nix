@@ -10,7 +10,7 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
-        python = pkgs.python311;
+        python = pkgs.python3;
 
         yaate = python.pkgs.buildPythonApplication {
           pname = "yaate";
@@ -25,7 +25,6 @@
             pygments
             rich
             python-dotenv
-            # google-generativeai not in nixpkgs yet — install via pip in devShell
           ];
         };
       in

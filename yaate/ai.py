@@ -6,24 +6,16 @@ Model: gemini-1.5-flash (free tier, 1M token context)
 
 import os
 import json
-import google.generativeai as genai
+import urllib.request
 from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
-
-# ── Setup ──────────────────────────────────────────────────────────────────────
-
-def _get_client():
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "GEMINI_API_KEY not set. Add it to your .env file:\n"
-            "  GEMINI_API_KEY=your_key_here"
-        )
-    genai.configure(api_key=api_key)
-    return genai.GenerativeModel("gemini-1.5-flash")
-
+# Search for .env in the current working directory
+env_path = Path.cwd() / ".env"
+if env_path.exists():
+    load_dotenv(dotenv_path=env_path)
+else:
+    load_dotenv() # Fallback
 
 # ── Shared helpers ─────────────────────────────────────────────────────────────
 
@@ -35,12 +27,71 @@ def _trim_context(lines: list[str], max_lines: int = 50) -> str:
     return "\n".join(lines[:half]) + "\n...\n" + "\n".join(lines[-half:])
 
 
+_MODEL_NAME = None
+
+def _get_model_name(api_key: str) -> str:
+    global _MODEL_NAME
+    if _MODEL_NAME:
+        return _MODEL_NAME
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+    req = urllib.request.Request(url)
+    try:
+        with urllib.request.urlopen(req) as response:
+            data = json.loads(response.read().decode("utf-8"))
+            for m in data.get("models", []):
+                # Prefer 1.5 flash
+                if "gemini-1.5-flash" in m["name"] and "generateContent" in m.get("supportedGenerationMethods", []):
+                    _MODEL_NAME = m["name"]
+                    return _MODEL_NAME
+            # Fallback to first available
+            for m in data.get("models", []):
+                if "generateContent" in m.get("supportedGenerationMethods", []):
+                    _MODEL_NAME = m["name"]
+                    return _MODEL_NAME
+    except Exception:
+        pass
+    
+    _MODEL_NAME = "models/gemini-1.5-flash"
+    return _MODEL_NAME
+
+
 def _call(prompt: str, system: str = "") -> str:
     """Single Gemini call, returns response text."""
-    model = _get_client()
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "GEMINI_API_KEY not set. Add it to your .env file:\n"
+            "  GEMINI_API_KEY=your_key_here"
+        )
+
+    model_name = _get_model_name(api_key)
+    # the name already contains 'models/' prefix
+    url = f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={api_key}"
     full_prompt = f"{system}\n\n{prompt}" if system else prompt
-    response = model.generate_content(full_prompt)
-    return response.text.strip()
+    
+    data = {
+        "contents": [{
+            "parts": [{"text": full_prompt}]
+        }]
+    }
+    
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(data).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+    
+    try:
+        with urllib.request.urlopen(req) as response:
+            res_data = json.loads(response.read().decode("utf-8"))
+            return res_data["candidates"][0]["content"]["parts"][0]["text"].strip()
+    except Exception as e:
+        if hasattr(e, "read"):
+            err_body = e.read().decode("utf-8")
+            return f"API Error: {e} - {err_body}"
+        return f"Error: {str(e)}"
 
 
 # ── Feature 1: Autocomplete ────────────────────────────────────────────────────
@@ -153,22 +204,29 @@ Format this file:
 
 # ── Feature 5: Error Explainer ─────────────────────────────────────────────────
 
-ERROR_SYSTEM = """You are a {mode} debugging expert.
-Analyze the error in context and return a structured explanation."""
+ERROR_SYSTEM = """You are a {mode} programming expert.
+Analyze the provided code snippet.
+If there is an error, bug, or bad practice, explain it and provide a fix.
+If the code is perfectly fine, explain what the code's purpose is.
+Respond in this exact format:
+WHAT: <one sentence — what the code does, or what the error means>
+WHY: <one sentence — why it works this way, or what caused the error>
+FIX: <if there's an error, exact corrected code. If no error, write 'None needed' or a minor tip>
+LINE: <line number of the focus area>"""
 
 ERROR_PROMPT = """File mode: {mode}
 
-File context (around the error):
+File context (around the cursor):
 {context}
 
-Error or problem:
+Target line or error context:
 {error}
 
-Respond in this exact format:
-WHAT: <one sentence — what the error means in plain English>
-WHY: <one sentence — what caused it in this specific code>
-FIX: <exact corrected code or action, as concise as possible>
-LINE: <line number where the fix should be applied, or 'unknown'>"""
+Respond in the exact format:
+WHAT: ...
+WHY: ...
+FIX: ...
+LINE: ..."""
 
 def explain_error(
     error: str,
@@ -305,7 +363,6 @@ def chat(
     Inline AI chat with file context.
     history: list of { role: 'user'|'model', text: str }
     """
-    model = _get_client()
 
     system = CHAT_SYSTEM.format(mode=mode)
 

@@ -11,8 +11,10 @@ from prompt_toolkit import Application
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.document import Document
 from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.layout import Layout, HSplit, VSplit, Window, ConditionalContainer
+from prompt_toolkit.layout import Layout, HSplit, VSplit, Window, ConditionalContainer, WindowAlign
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
+from prompt_toolkit.layout.processors import Processor, Transformation
+from prompt_toolkit.layout.margins import NumberedMargin
 from prompt_toolkit.lexers import PygmentsLexer
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.styles import Style
@@ -20,6 +22,39 @@ from pygments.lexers import get_lexer_by_name, TextLexer
 
 from .detector import detect_mode, get_comment_syntax, get_formatter, mode_display_name
 from . import ai
+
+class SmellProcessor(Processor):
+    def __init__(self, editor):
+        self.editor = editor
+
+    def apply_transformation(self, transformation_input):
+        smell_lines = {s["line"]: s["severity"] for s in self.editor.smells}
+        lineno = transformation_input.lineno + 1
+        if lineno in smell_lines:
+            icon = SEVERITY_ICON.get(smell_lines[lineno], "⚠")
+            fragments = list(transformation_input.fragments)
+            fragments.append(("class:gutter.smell", f"  [{icon} smell]"))
+            return Transformation(fragments)
+        return Transformation(transformation_input.fragments)
+
+class GhostTextProcessor(Processor):
+    def __init__(self, editor):
+        self.editor = editor
+
+    def apply_transformation(self, transformation_input):
+        ghost_text = self.editor.ghost_text
+        if not ghost_text:
+            return Transformation(transformation_input.fragments)
+
+        doc = transformation_input.document
+        if transformation_input.lineno == doc.cursor_position_row:
+            line = doc.lines[transformation_input.lineno]
+            if doc.cursor_position_col == len(line):
+                fragments = list(transformation_input.fragments)
+                fragments.append(("class:ghostbar", ghost_text))
+                return Transformation(fragments)
+                
+        return Transformation(transformation_input.fragments)
 
 
 # ── Pygments lexer map ─────────────────────────────────────────────────────────
@@ -132,54 +167,36 @@ class Editor:
     # ── Layout ─────────────────────────────────────────────────────────────────
 
     def _build_layout(self):
-        # Status bar text
-        def status_text():
-            fname = self.filepath.name if self.filepath else "[scratch]"
-            mod = " ●" if self.modified else ""
-            mode_label = mode_display_name(self.mode)
-            ghost = f"  ┆ {self.ghost_text[:40]}…" if self.ghost_text else ""
-            smell_count = len(self.smells)
-            smells_label = f"  ┆ {smell_count} issue{'s' if smell_count != 1 else ''}" if smell_count else ""
-            return f" {fname}{mod}  ┆  {mode_label}{smells_label}{ghost}   [Ctrl+H help]"
-
-        # Gutter (line numbers + smell markers)
-        def gutter_text():
-            lines = self.buffer.text.splitlines()
-            smell_lines = {s["line"]: s["severity"] for s in self.smells}
-            result = []
-            for i, _ in enumerate(lines):
-                lineno = i + 1
-                if lineno in smell_lines:
-                    icon = SEVERITY_ICON.get(smell_lines[lineno], "  ")
-                    result.append(("class:gutter.smell", f" {icon} {lineno:4d} │ "))
-                else:
-                    result.append(("class:gutter", f"      {lineno:4d} │ "))
-                result.append(("", "\n"))
-            return result
-
         self.layout = Layout(
             HSplit([
-                # Status bar
-                Window(
-                    content=FormattedTextControl(status_text),
-                    height=1,
-                    style="class:statusbar",
-                ),
-                # Editor row: gutter + buffer
+                # Title bar (like nano)
                 VSplit([
                     Window(
-                        content=FormattedTextControl(gutter_text),
-                        width=12,
-                        style="class:gutter",
+                        content=FormattedTextControl(lambda: "  yaate 0.1.0"),
+                        align=WindowAlign.LEFT,
+                        style="class:titlebar",
                     ),
                     Window(
-                        content=BufferControl(
-                            buffer=self.buffer,
-                            lexer=_get_lexer(self.mode),
-                            focus_on_click=True,
-                        ),
+                        content=FormattedTextControl(lambda: f"File: {self.filepath.name if self.filepath else 'New Buffer'} [{mode_display_name(self.mode)}]{' (Modified)' if self.modified else ''}"),
+                        align=WindowAlign.CENTER,
+                        style="class:titlebar",
                     ),
-                ]),
+                    Window(
+                        content=FormattedTextControl(lambda: ""),
+                        align=WindowAlign.RIGHT,
+                        style="class:titlebar",
+                    ),
+                ], height=1),
+                # Editor row: buffer with numbered margin
+                Window(
+                    content=BufferControl(
+                        buffer=self.buffer,
+                        lexer=_get_lexer(self.mode),
+                        focus_on_click=True,
+                        input_processors=[GhostTextProcessor(self), SmellProcessor(self)],
+                    ),
+                    left_margins=[NumberedMargin()],
+                ),
                 # Bottom info panel (error explainer, smell list, etc.)
                 ConditionalContainer(
                     content=Window(
@@ -240,7 +257,7 @@ class Editor:
                 # Help bar
                 Window(
                     content=FormattedTextControl(
-                        " ^O WriteOut  ^X Exit  ^W WhereIs  ^_ GoToLine  ^/ AI-Comment  ^E AI-Explain  ^F AI-Format  ^D AI-Doc  ^C AI-Chat"
+                        " ^O Save  ^X Quit  ^W Find  ^_ Line  ^T Comment  ^E Explain  ^F Format  ^C Chat  ^Y YankChat"
                     ),
                     height=1,
                     style="class:helpbar",
@@ -299,24 +316,15 @@ class Editor:
             if self.ghost_text:
                 self.ghost_text = ""
                 self._refresh()
-            elif self.chat_panel_visible:
+            else:
                 self.chat_panel_visible = False
-                self.chat_input_text = ""
-                self._refresh()
-            elif self.find_panel_visible:
                 self.find_panel_visible = False
-                self.find_input_text = ""
-                self._refresh()
-            elif self.jump_panel_visible:
                 self.jump_panel_visible = False
-                self.jump_input_text = ""
-                self._refresh()
-            elif self.bottom_panel_visible:
                 self.bottom_panel_visible = False
                 self._refresh()
 
-        # ── Ctrl+/ — Comment current line ─────────────────────────────────────
-        @kb.add("c-/")
+        # ── Ctrl+T — Comment current line ─────────────────────────────────────
+        @kb.add("c-t")
         def comment_line(event):
             self._run_in_thread(self._do_comment_line)
 
@@ -325,8 +333,8 @@ class Editor:
         def error_explain(event):
             self._run_in_thread(self._do_error_explain)
 
-        # ── Ctrl+Shift+F — Format file ────────────────────────────────────────
-        @kb.add("c-F")
+        # ── Ctrl+F — Format file ──────────────────────────────────────────────
+        @kb.add("c-f")
         def format_file(event):
             self._run_in_thread(self._do_format)
 
@@ -342,45 +350,47 @@ class Editor:
             self.bottom_panel_visible = False
             self._refresh()
 
+        # ── Ctrl+Y — Yank (insert) last AI chat response ───────────────────────
+        @kb.add("c-y")
+        def yank_chat(event):
+            if hasattr(self, 'chat_history') and self.chat_history:
+                last_msg = self.chat_history[-1]
+                if last_msg["role"] == "model":
+                    self.buffer.insert_text(last_msg["text"])
+                    self._show_panel("✓ Inserted AI response into code.")
+                else:
+                    self._show_panel("✗ Last message was not from AI.")
+            else:
+                self._show_panel("✗ No AI chat history to copy.")
+
         # ── Multi-panel character input ────────────────────────────────────────
-        @kb.add("<any>", filter=Condition(lambda: self.chat_panel_visible or self.find_panel_visible or self.jump_panel_visible))
+        panel_visible = Condition(lambda: self.chat_panel_visible or self.find_panel_visible or self.jump_panel_visible)
+
+        @kb.add("enter", filter=panel_visible)
+        @kb.add("c-m", filter=panel_visible)
+        def panel_enter(event):
+            if self.chat_panel_visible and self.chat_input_text.strip():
+                self._run_in_thread(self._do_chat)
+            elif self.find_panel_visible and self.find_input_text:
+                self._do_find()
+            elif self.jump_panel_visible and self.jump_input_text:
+                self._do_jump()
+
+        @kb.add("backspace", filter=panel_visible)
+        def panel_backspace(event):
+            if self.chat_panel_visible: self.chat_input_text = self.chat_input_text[:-1]
+            elif self.find_panel_visible: self.find_input_text = self.find_input_text[:-1]
+            elif self.jump_panel_visible: self.jump_input_text = self.jump_input_text[:-1]
+            self._refresh()
+
+        @kb.add("<any>", filter=panel_visible)
         def multi_input(event):
             key = event.key_sequence[0].key
-            if key == "enter":
-                if self.chat_panel_visible and self.chat_input_text.strip():
-                    self._run_in_thread(self._do_chat)
-                elif self.find_panel_visible and self.find_input_text:
-                    self._do_find()
-                elif self.jump_panel_visible and self.jump_input_text:
-                    self._do_jump()
-            elif key == "backspace":
-                if self.chat_panel_visible: self.chat_input_text = self.chat_input_text[:-1]
-                elif self.find_panel_visible: self.find_input_text = self.find_input_text[:-1]
-                elif self.jump_panel_visible: self.jump_input_text = self.jump_input_text[:-1]
-                self._refresh()
-            elif len(key) == 1:
+            if len(key) == 1:
                 if self.chat_panel_visible: self.chat_input_text += key
                 elif self.find_panel_visible: self.find_input_text += key
                 elif self.jump_panel_visible: self.jump_input_text += key
                 self._refresh()
-
-        # ── Ctrl+H — Toggle help ───────────────────────────────────────────────
-        @kb.add("c-h")
-        def help(event):
-            self._show_panel(
-                "─── Keybindings ──────────────────────────────────────────\n"
-                "  Ctrl+O          Save (WriteOut)\n"
-                "  Ctrl+X          Quit (Exit)\n"
-                "  Ctrl+W          Find (Where Is)\n"
-                "  Ctrl+_          Go To Line\n"
-                "  Ctrl+/          AI-Comment current line\n"
-                "  Ctrl+E          AI-Explain error on current line\n"
-                "  Ctrl+F          AI-Format file\n"
-                "  Ctrl+D          AI-Generate docstring for current function\n"
-                "  Ctrl+C          Toggle AI-Chat panel\n"
-                "  Esc             Dismiss ghost text / close panels\n"
-                "──────────────────────────────────────────────────────────"
-            )
 
         self.kb = kb
 
@@ -388,10 +398,11 @@ class Editor:
 
     def _build_style(self):
         self.style = Style.from_dict({
-            "statusbar":        "bg:#1e2030 #8090aa bold",
+            "titlebar":         "bg:#dddddd fg:#000000 bold",
+            "ghostbar":         "fg:#9ece6a italic",
             "helpbar":          "bg:#161622 #4a5568",
-            "gutter":           "bg:#161622 #3d4455",
-            "gutter.smell":     "bg:#161622 #e0af68",
+            "line-number":      "bg:#161622 fg:#3d4455",
+            "gutter.smell":     "fg:#e0af68 bold",
             "panel":            "bg:#0f0e16 #a9b1d6",
             "panel.header":     "bg:#1e2030 #8090aa",
         })
@@ -409,18 +420,36 @@ class Editor:
 
     def _on_text_changed(self, _):
         self.modified = True
-        self.ghost_text = ""
-        self._refresh()
+        if self.ghost_text:
+            self.ghost_text = ""
+            self._refresh()
 
-        if hasattr(self, '_autocomplete_timer') and self._autocomplete_timer:
-            self._autocomplete_timer.cancel()
-        if hasattr(self, '_smell_timer') and self._smell_timer:
-            self._smell_timer.cancel()
+        import asyncio
+        loop = asyncio.get_event_loop()
+
+        if hasattr(self, '_autocomplete_task') and self._autocomplete_task:
+            self._autocomplete_task.cancel()
+        if hasattr(self, '_smell_task') and self._smell_task:
+            self._smell_task.cancel()
             
-        self._autocomplete_timer = threading.Timer(0.5, self._run_in_thread_silent, args=(self._do_autocomplete,))
-        self._autocomplete_timer.start()
-        self._smell_timer = threading.Timer(2.0, self._run_in_thread_silent, args=(self._do_smell_detect,))
-        self._smell_timer.start()
+        async def delayed_autocomplete():
+            try:
+                await asyncio.sleep(2.0)
+                import threading
+                threading.Thread(target=self._do_autocomplete, daemon=True).start()
+            except asyncio.CancelledError:
+                pass
+
+        async def delayed_smell():
+            try:
+                await asyncio.sleep(2.0)
+                import threading
+                threading.Thread(target=self._do_smell_detect, daemon=True).start()
+            except asyncio.CancelledError:
+                pass
+
+        self._autocomplete_task = loop.create_task(delayed_autocomplete())
+        self._smell_task = loop.create_task(delayed_smell())
 
     def _save(self):
         if not self.filepath:

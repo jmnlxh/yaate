@@ -31,8 +31,13 @@ def main():
     else:
         filepath = None  # open scratch buffer
 
-    editor = Editor(filepath)
-    editor.run()
+    try:
+        editor = Editor(filepath)
+        editor.run()
+    finally:
+        # Guarantee terminal is fully reset (mouse tracking off, alt screen off)
+        sys.stdout.write("\x1b[?1049l\x1b[?1000l\x1b[?1002l\x1b[?1015l\x1b[?1006l\x1b[0m")
+        sys.stdout.flush()
 
 
 if __name__ == "__main__":
