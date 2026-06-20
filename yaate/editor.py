@@ -434,7 +434,7 @@ class Editor:
             
         async def delayed_autocomplete():
             try:
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(0.75)
                 import threading
                 threading.Thread(target=self._do_autocomplete, daemon=True).start()
             except asyncio.CancelledError:
