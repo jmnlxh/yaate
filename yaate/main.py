@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-aied — AI-Assisted CLI Editor
+yaate — Yet Another AI-assisted Text Editor
 Entry point
 """
 
@@ -12,12 +12,12 @@ from .editor import Editor
 
 def main():
     parser = argparse.ArgumentParser(
-        prog="aied",
-        description="AI-assisted CLI editor powered by Gemini"
+        prog="yaate",
+        description="Yet Another AI-assisted text editor powered by Gemini"
     )
     parser.add_argument("file", nargs="?", help="File to open")
     parser.add_argument("--readme", action="store_true", help="Generate README.md for current project")
-    parser.add_argument("--version", action="version", version="aied 0.1.0")
+    parser.add_argument("--version", action="version", version="yaate 0.1.0")
 
     args = parser.parse_args()
 

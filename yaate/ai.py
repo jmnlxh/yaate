@@ -290,7 +290,7 @@ def smell_detect(file_lines: list[str], mode: str) -> list[dict]:
 
 # ── Feature 7: Inline AI Chat ─────────────────────────────────────────────────
 
-CHAT_SYSTEM = """You are aied, an AI-assisted CLI editor assistant.
+CHAT_SYSTEM = """You are yaate, an AI-assisted CLI editor assistant.
 The user is editing a {mode} file. Answer questions about the file concisely.
 Keep responses short and terminal-friendly (no wide tables, no long paragraphs).
 Use plain text. You may use short code snippets."""

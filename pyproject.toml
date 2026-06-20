@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.backends.legacy:build"
 
 [project]
-name = "aied"
+name = "yaate"
 version = "0.1.0"
-description = "AI-assisted CLI editor powered by Gemini"
+description = "Yet Another AI-assisted text editor powered by Gemini"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -19,8 +19,8 @@ dependencies = [
 ]
 
 [project.scripts]
-aied = "aied.main:main"
+yaate = "yaate.main:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["aied*"]
+include = ["yaate*"]

@@ -1,21 +1,21 @@
-# aied — AI-Assisted CLI Editor
+# yaate — Yet Another AI-assisted Text Editor
 
 A lightweight terminal editor powered by Gemini 1.5 Flash. Call it like `nano` or `vim`.
 
 ```bash
-aied file.py
-aied flake.nix
-aied /etc/nginx/nginx.conf
+yaate file.py
+yaate flake.nix
+yaate /etc/nginx/nginx.conf
 ```
 
 ## Features
 
 | Keybind | Feature |
 |---|---|
-| `Ctrl+Space` | AI autocomplete — Tab accept, Esc dismiss |
+| `(Automatic)` | AI autocomplete as you type — Tab accept, Esc dismiss |
 | `Ctrl+/` | Comment current line with AI explanation |
 | `Ctrl+E` | Explain error on current line |
-| `Ctrl+A` | Analyze file — code smell detector with gutter markers |
+| `(Automatic)` | Analyze file — code smell detector with gutter markers as you type |
 | `Ctrl+F` | Format file (local formatter → Gemini fallback) |
 | `Ctrl+D` | Generate docstring for current function |
 | `Ctrl+C` | Toggle AI chat panel |
@@ -39,18 +39,18 @@ file.py              → python
 
 ### Standard (pip)
 ```bash
-git clone https://github.com/jmnlxh/aied
-cd aied
+git clone https://github.com/jmnlxh/yaate
+cd yaate
 pip install -e .
 cp .env.example .env
 # add your GEMINI_API_KEY to .env
-aied file.py
+yaate file.py
 ```
 
 ### NixOS (flake devShell)
 ```bash
 nix develop
-aied file.py
+yaate file.py
 ```
 
 ### NixOS (system package)
@@ -78,8 +78,8 @@ All features use `gemini-1.5-flash` — the free tier gives 1M tokens/day.
 ## Project Structure
 
 ```
-aied/
-├── aied/
+yaate/
+├── yaate/
 │   ├── __init__.py
 │   ├── main.py       ← entry point, CLI args
 │   ├── editor.py     ← prompt_toolkit editor, keybinds, layout

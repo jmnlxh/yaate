@@ -204,7 +204,7 @@ class Editor:
                 # Help bar
                 Window(
                     content=FormattedTextControl(
-                        " ^Space autocomplete  ^/ comment  ^E error  ^A analyze  ^F format  ^D docstring  ^C chat  ^S save  ^Q quit"
+                        " ^/ comment  ^E error  ^F format  ^D docstring  ^C chat  ^S save  ^Q quit"
                     ),
                     height=1,
                     style="class:helpbar",
@@ -226,11 +226,6 @@ class Editor:
         @kb.add("c-q")
         def quit(event):
             event.app.exit()
-
-        # ── Ctrl+Space — Autocomplete ──────────────────────────────────────────
-        @kb.add("c-space")
-        def autocomplete(event):
-            self._run_in_thread(self._do_autocomplete)
 
         # ── Tab — Accept ghost text ────────────────────────────────────────────
         @kb.add("tab")
@@ -265,11 +260,6 @@ class Editor:
         @kb.add("c-e")
         def error_explain(event):
             self._run_in_thread(self._do_error_explain)
-
-        # ── Ctrl+Shift+A — Code smell detector ────────────────────────────────
-        @kb.add("c-A")
-        def smell_detect(event):
-            self._run_in_thread(self._do_smell_detect)
 
         # ── Ctrl+Shift+F — Format file ────────────────────────────────────────
         @kb.add("c-F")
@@ -307,10 +297,8 @@ class Editor:
         def help(event):
             self._show_panel(
                 "─── Keybindings ──────────────────────────────────────────\n"
-                "  Ctrl+Space      Autocomplete (Tab accept, Esc dismiss)\n"
                 "  Ctrl+/          Comment current line\n"
                 "  Ctrl+E          Explain error on current line\n"
-                "  Ctrl+A          Analyze file (code smell detector)\n"
                 "  Ctrl+F          Format file\n"
                 "  Ctrl+D          Generate docstring for current function\n"
                 "  Ctrl+C          Toggle AI chat panel\n"
@@ -348,10 +336,21 @@ class Editor:
     def _on_text_changed(self, _):
         self.modified = True
         self.ghost_text = ""
+        self._refresh()
+
+        if hasattr(self, '_autocomplete_timer') and self._autocomplete_timer:
+            self._autocomplete_timer.cancel()
+        if hasattr(self, '_smell_timer') and self._smell_timer:
+            self._smell_timer.cancel()
+            
+        self._autocomplete_timer = threading.Timer(0.5, self._run_in_thread_silent, args=(self._do_autocomplete,))
+        self._autocomplete_timer.start()
+        self._smell_timer = threading.Timer(2.0, self._run_in_thread_silent, args=(self._do_smell_detect,))
+        self._smell_timer.start()
 
     def _save(self):
         if not self.filepath:
-            self._show_panel("No file path — use 'aied <filename>' to open with a path.")
+            self._show_panel("No file path — use 'yaate <filename>' to open with a path.")
             return
         try:
             self.filepath.write_text(self.buffer.text)
@@ -363,6 +362,11 @@ class Editor:
     def _run_in_thread(self, fn):
         """Run AI call in background thread so UI doesn't freeze."""
         self._show_panel("⟳ Thinking…")
+        thread = threading.Thread(target=fn, daemon=True)
+        thread.start()
+
+    def _run_in_thread_silent(self, fn):
+        """Run AI call silently in background thread."""
         thread = threading.Thread(target=fn, daemon=True)
         thread.start()
 
@@ -382,9 +386,9 @@ class Editor:
             row = self._current_line_index()
             suggestion = ai.autocomplete(lines, row, self.mode)
             self.ghost_text = suggestion
-            self._show_panel(f"  Suggestion ready — Tab to accept, Esc to dismiss\n  {suggestion[:120]}")
-        except Exception as e:
-            self._show_panel(f"✗ Autocomplete error: {e}")
+            self._refresh()
+        except Exception:
+            pass
 
     def _do_comment_line(self):
         try:
@@ -445,23 +449,9 @@ class Editor:
         try:
             lines = self._file_lines()
             self.smells = ai.smell_detect(lines, self.mode)
-
-            if not self.smells:
-                self._show_panel("✓ No issues found.")
-                return
-
-            rows = [f"─── Code Analysis ── {len(self.smells)} issue(s) found ──────────────────"]
-            for s in self.smells:
-                icon = SEVERITY_ICON.get(s["severity"], "  ")
-                rows.append(f"  [{icon}]  Line {s['line']:4d}  │  {s['issue']}")
-                if s.get("fix"):
-                    rows.append(f"              Fix: {s['fix']}")
-            rows.append("─────────────────────────────────────────────────────────")
-            rows.append("  Ctrl+E on a flagged line for detailed explanation")
-
-            self._show_panel("\n".join(rows))
-        except Exception as e:
-            self._show_panel(f"✗ Analysis error: {e}")
+            self._refresh()
+        except Exception:
+            pass
 
     def _do_format(self):
         try:
