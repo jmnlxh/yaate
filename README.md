@@ -40,20 +40,6 @@ file.py              → python
 
 ## Install
 
-### NixOS
-You can build the native executable natively using the Nix flake:
-```bash
-git clone https://github.com/jmnlxh/yaate
-cd yaate
-nix build
-./result/bin/yaate file.py
-```
-Or run a development shell:
-```bash
-nix develop
-yaate file.py
-```
-
 ### Linux & macOS (pip)
 For standard Linux distributions (Ubuntu, Arch, Fedora, etc.) and macOS, install using `pip`:
 ```bash
@@ -67,6 +53,23 @@ cp .env.example .env
 
 yaate file.py
 ```
+
+<details>
+<summary>NixOS</summary>
+
+You can build the native executable natively using the Nix flake:
+```bash
+git clone https://github.com/jmnlxh/yaate
+cd yaate
+nix build
+./result/bin/yaate file.py
+```
+Or run a development shell:
+```bash
+nix develop
+yaate file.py
+```
+</details>
 
 ### Windows (pip)
 Because `yaate` is built entirely in Python using `prompt_toolkit`, it is 100% natively compatible with Windows. It works flawlessly in CMD, PowerShell, and Windows Terminal.
