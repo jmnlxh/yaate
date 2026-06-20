@@ -96,6 +96,10 @@ class Editor:
         self.bottom_panel_visible = False
         self.chat_panel_visible = False
         self.chat_input_text = ""
+        self.find_panel_visible = False
+        self.find_input_text = ""
+        self.jump_panel_visible = False
+        self.jump_input_text = ""
 
         # Load file
         initial_text = ""
@@ -201,10 +205,42 @@ class Editor:
                     ]),
                     filter=Condition(lambda: self.chat_panel_visible),
                 ),
+                # Find input panel
+                ConditionalContainer(
+                    content=HSplit([
+                        Window(
+                            content=FormattedTextControl(lambda: "─── Find (Where Is) (Enter to search, Esc to close) ───"),
+                            height=1,
+                            style="class:panel.header",
+                        ),
+                        Window(
+                            content=FormattedTextControl(lambda: f"Search: {self.find_input_text}█"),
+                            height=1,
+                            style="class:panel",
+                        ),
+                    ]),
+                    filter=Condition(lambda: self.find_panel_visible),
+                ),
+                # Jump input panel
+                ConditionalContainer(
+                    content=HSplit([
+                        Window(
+                            content=FormattedTextControl(lambda: "─── Go To Line (Enter to jump, Esc to close) ──────────"),
+                            height=1,
+                            style="class:panel.header",
+                        ),
+                        Window(
+                            content=FormattedTextControl(lambda: f"Line number: {self.jump_input_text}█"),
+                            height=1,
+                            style="class:panel",
+                        ),
+                    ]),
+                    filter=Condition(lambda: self.jump_panel_visible),
+                ),
                 # Help bar
                 Window(
                     content=FormattedTextControl(
-                        " ^/ comment  ^E error  ^F format  ^D docstring  ^C chat  ^S save  ^Q quit"
+                        " ^O WriteOut  ^X Exit  ^W WhereIs  ^_ GoToLine  ^/ AI-Comment  ^E AI-Explain  ^F AI-Format  ^D AI-Doc  ^C AI-Chat"
                     ),
                     height=1,
                     style="class:helpbar",
@@ -217,15 +253,35 @@ class Editor:
     def _build_keybindings(self):
         kb = KeyBindings()
 
-        # ── Ctrl+S — Save ──────────────────────────────────────────────────────
-        @kb.add("c-s")
+        # ── Ctrl+O — Save (WriteOut) ───────────────────────────────────────────
+        @kb.add("c-o")
         def save(event):
             self._save()
 
-        # ── Ctrl+Q — Quit ──────────────────────────────────────────────────────
-        @kb.add("c-q")
+        # ── Ctrl+X — Quit (Exit) ───────────────────────────────────────────────
+        @kb.add("c-x")
         def quit(event):
             event.app.exit()
+
+        # ── Ctrl+W — Find (Where Is) ───────────────────────────────────────────
+        @kb.add("c-w")
+        def find(event):
+            self.find_panel_visible = True
+            self.find_input_text = ""
+            self.jump_panel_visible = False
+            self.chat_panel_visible = False
+            self.bottom_panel_visible = False
+            self._refresh()
+
+        # ── Ctrl+_ — Go To Line ────────────────────────────────────────────────
+        @kb.add("c-_")
+        def jump_to_line(event):
+            self.jump_panel_visible = True
+            self.jump_input_text = ""
+            self.find_panel_visible = False
+            self.chat_panel_visible = False
+            self.bottom_panel_visible = False
+            self._refresh()
 
         # ── Tab — Accept ghost text ────────────────────────────────────────────
         @kb.add("tab")
@@ -246,6 +302,14 @@ class Editor:
             elif self.chat_panel_visible:
                 self.chat_panel_visible = False
                 self.chat_input_text = ""
+                self._refresh()
+            elif self.find_panel_visible:
+                self.find_panel_visible = False
+                self.find_input_text = ""
+                self._refresh()
+            elif self.jump_panel_visible:
+                self.jump_panel_visible = False
+                self.jump_input_text = ""
                 self._refresh()
             elif self.bottom_panel_visible:
                 self.bottom_panel_visible = False
@@ -278,18 +342,26 @@ class Editor:
             self.bottom_panel_visible = False
             self._refresh()
 
-        # ── Chat: character input ──────────────────────────────────────────────
-        @kb.add("<any>", filter=Condition(lambda: self.chat_panel_visible))
-        def chat_input(event):
+        # ── Multi-panel character input ────────────────────────────────────────
+        @kb.add("<any>", filter=Condition(lambda: self.chat_panel_visible or self.find_panel_visible or self.jump_panel_visible))
+        def multi_input(event):
             key = event.key_sequence[0].key
             if key == "enter":
-                if self.chat_input_text.strip():
+                if self.chat_panel_visible and self.chat_input_text.strip():
                     self._run_in_thread(self._do_chat)
+                elif self.find_panel_visible and self.find_input_text:
+                    self._do_find()
+                elif self.jump_panel_visible and self.jump_input_text:
+                    self._do_jump()
             elif key == "backspace":
-                self.chat_input_text = self.chat_input_text[:-1]
+                if self.chat_panel_visible: self.chat_input_text = self.chat_input_text[:-1]
+                elif self.find_panel_visible: self.find_input_text = self.find_input_text[:-1]
+                elif self.jump_panel_visible: self.jump_input_text = self.jump_input_text[:-1]
                 self._refresh()
             elif len(key) == 1:
-                self.chat_input_text += key
+                if self.chat_panel_visible: self.chat_input_text += key
+                elif self.find_panel_visible: self.find_input_text += key
+                elif self.jump_panel_visible: self.jump_input_text += key
                 self._refresh()
 
         # ── Ctrl+H — Toggle help ───────────────────────────────────────────────
@@ -297,13 +369,15 @@ class Editor:
         def help(event):
             self._show_panel(
                 "─── Keybindings ──────────────────────────────────────────\n"
-                "  Ctrl+/          Comment current line\n"
-                "  Ctrl+E          Explain error on current line\n"
-                "  Ctrl+F          Format file\n"
-                "  Ctrl+D          Generate docstring for current function\n"
-                "  Ctrl+C          Toggle AI chat panel\n"
-                "  Ctrl+S          Save\n"
-                "  Ctrl+Q          Quit\n"
+                "  Ctrl+O          Save (WriteOut)\n"
+                "  Ctrl+X          Quit (Exit)\n"
+                "  Ctrl+W          Find (Where Is)\n"
+                "  Ctrl+_          Go To Line\n"
+                "  Ctrl+/          AI-Comment current line\n"
+                "  Ctrl+E          AI-Explain error on current line\n"
+                "  Ctrl+F          AI-Format file\n"
+                "  Ctrl+D          AI-Generate docstring for current function\n"
+                "  Ctrl+C          Toggle AI-Chat panel\n"
                 "  Esc             Dismiss ghost text / close panels\n"
                 "──────────────────────────────────────────────────────────"
             )
@@ -377,6 +451,30 @@ class Editor:
 
     def _file_lines(self) -> list[str]:
         return self.buffer.text.splitlines()
+
+    def _do_find(self):
+        text = self.buffer.text
+        # Search starting from right after the cursor
+        idx = text.find(self.find_input_text, self.buffer.cursor_position + 1)
+        if idx == -1:
+            idx = text.find(self.find_input_text) # Wrap around
+        if idx != -1:
+            self.buffer.cursor_position = idx
+        self.find_panel_visible = False
+        self._refresh()
+
+    def _do_jump(self):
+        try:
+            line = int(self.jump_input_text) - 1
+            lines = self.buffer.text.splitlines()
+            line = max(0, min(line, len(lines) - 1))
+            # Calculate absolute character position
+            pos = sum(len(l) + 1 for l in lines[:line])
+            self.buffer.cursor_position = pos
+        except ValueError:
+            pass
+        self.jump_panel_visible = False
+        self._refresh()
 
     # ── AI Feature Implementations ─────────────────────────────────────────────
 

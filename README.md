@@ -12,15 +12,17 @@ yaate /etc/nginx/nginx.conf
 
 | Keybind | Feature |
 |---|---|
+| `Ctrl+O` | Save (WriteOut) |
+| `Ctrl+X` | Quit (Exit) |
+| `Ctrl+W` | Find (Where Is) |
+| `Ctrl+_` | Go To Line |
 | `(Automatic)` | AI autocomplete as you type — Tab accept, Esc dismiss |
-| `Ctrl+/` | Comment current line with AI explanation |
-| `Ctrl+E` | Explain error on current line |
-| `(Automatic)` | Analyze file — code smell detector with gutter markers as you type |
-| `Ctrl+F` | Format file (local formatter → Gemini fallback) |
-| `Ctrl+D` | Generate docstring for current function |
-| `Ctrl+C` | Toggle AI chat panel |
-| `Ctrl+S` | Save |
-| `Ctrl+Q` | Quit |
+| `Ctrl+/` | AI-Comment current line with explanation |
+| `Ctrl+E` | AI-Explain error on current line |
+| `(Automatic)` | AI-Analyze file — code smell detector with gutter markers as you type |
+| `Ctrl+F` | AI-Format file (local formatter → Gemini fallback) |
+| `Ctrl+D` | AI-Generate docstring for current function |
+| `Ctrl+C` | Toggle AI-Chat panel |
 
 ## Config Recognizer
 
