@@ -1,4 +1,4 @@
-# yaate — Yet Another AI-assisted Text Editor
+# yaate — Yet Another AI-assisted Text Editor (WIP)
 
 A lightweight terminal editor powered by Gemini AI. Call it like `nano` or `vim`.
 
