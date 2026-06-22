@@ -398,13 +398,13 @@ class Editor:
 
     def _build_style(self):
         self.style = Style.from_dict({
-            "titlebar":         "bg:#dddddd fg:#000000 bold",
-            "ghostbar":         "fg:#9ece6a italic",
-            "helpbar":          "bg:#161622 #4a5568",
-            "line-number":      "bg:#161622 fg:#3d4455",
-            "gutter.smell":     "fg:#e0af68 bold",
-            "panel":            "bg:#0f0e16 #a9b1d6",
-            "panel.header":     "bg:#1e2030 #8090aa",
+            "titlebar":         "reverse bold",
+            "ghostbar":         "fg:ansibrightgreen italic",
+            "helpbar":          "reverse",
+            "line-number":      "fg:ansigray",
+            "gutter.smell":     "fg:ansiyellow bold",
+            "panel":            "",
+            "panel.header":     "reverse",
         })
 
     # ── Internal helpers ───────────────────────────────────────────────────────

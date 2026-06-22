@@ -1,9 +1,3 @@
-"""
-ai.py — Gemini API integration
-All prompts and AI feature calls live here.
-Model: gemini-1.5-flash (free tier, 1M token context)
-"""
-
 import os
 import json
 import urllib.request
@@ -15,9 +9,7 @@ env_path = Path.cwd() / ".env"
 if env_path.exists():
     load_dotenv(dotenv_path=env_path)
 else:
-    load_dotenv() # Fallback
-
-# ── Shared helpers ─────────────────────────────────────────────────────────────
+    load_dotenv() # Fallback to default .env loading (current dir and parents)
 
 def _trim_context(lines: list[str], max_lines: int = 50) -> str:
     """Trim file context to avoid burning tokens on large files."""
@@ -110,7 +102,7 @@ def autocomplete(lines: list[str], cursor_row: int, mode: str) -> str:
     Return AI completion text starting from the cursor position.
     Context: lines above cursor (max 40 lines).
     """
-    # Optimize API usage: send only 15 lines of context instead of 40
+    
     context_lines = lines[max(0, cursor_row - 15): cursor_row + 1]
     context = "\n".join(context_lines)
 
