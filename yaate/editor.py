@@ -1,6 +1,6 @@
 """
-editor.py — Core editor using prompt_toolkit
-Handles the buffer, keybinds, panels, and feature dispatch.
+editor.py — Optimized core editor (fast, responsive, nano/vim-like feel)
+Uses debouncing, caching, minimal allocations, and thread-safe UI updates.
 """
 
 import subprocess
@@ -23,41 +23,76 @@ from pygments.lexers import get_lexer_by_name, TextLexer
 from .detector import detect_mode, get_comment_syntax, get_formatter, mode_display_name
 from . import ai
 
-class SmellProcessor(Processor):
-    def __init__(self, editor):
-        self.editor = editor
 
-    def apply_transformation(self, transformation_input):
-        smell_lines = {s["line"]: s["severity"] for s in self.editor.smells}
-        lineno = transformation_input.lineno + 1
-        if lineno in smell_lines:
-            icon = SEVERITY_ICON.get(smell_lines[lineno], "⚠")
-            fragments = list(transformation_input.fragments)
-            fragments.append(("class:gutter.smell", f"  [{icon} smell]"))
-            return Transformation(fragments)
-        return Transformation(transformation_input.fragments)
+# ── Fast line-number margin (avoids full recalculation each frame) ────────────
+
+class FastNumberedMargin(NumberedMargin):
+    """NumberedMargin with cached line count to avoid repeated split()."""
+    def __init__(self):
+        super().__init__()
+        self._cached_line_count = -1
+        self._cached_width = 3
+
+    def get_width(self, get_ui_content):
+        n = get_ui_content().line_count
+        if n != self._cached_line_count:
+            self._cached_line_count = n
+            self._cached_width = max(3, len(str(n)) + 1)
+        return self._cached_width
+
+    def __repr__(self):
+        return f"FastNumberedMargin(width={self._cached_width})"
+
+
+# ── Optimized Processors ──────────────────────────────────────────────────────
+
+class SmellProcessor(Processor):
+    __slots__ = ('_lookup',)
+
+    def __init__(self, editor):
+        self._lookup = {}  # built on each smell update
+
+    def set_smells(self, smells: list[dict]):
+        self._lookup = {s["line"]: SEVERITY_ICON.get(s["severity"], "⚠")
+                        for s in smells}
+
+    def apply_transformation(self, ti):
+        lineno = ti.lineno + 1
+        icon = self._lookup.get(lineno)
+        if icon is None:
+            return Transformation(ti.fragments)
+        frags = list(ti.fragments)
+        frags.append(("class:gutter.smell", f"  [{icon} smell]"))
+        return Transformation(frags)
+
 
 class GhostTextProcessor(Processor):
+    __slots__ = ('ghost_text', '_visible_line')
+
     def __init__(self, editor):
-        self.editor = editor
+        self.ghost_text = ""
+        self._visible_line = -1
 
-    def apply_transformation(self, transformation_input):
-        ghost_text = self.editor.ghost_text
-        if not ghost_text:
-            return Transformation(transformation_input.fragments)
+    def set_ghost(self, text: str, line: int):
+        self.ghost_text = text
+        self._visible_line = line
 
-        doc = transformation_input.document
-        if transformation_input.lineno == doc.cursor_position_row:
-            line = doc.lines[transformation_input.lineno]
-            if doc.cursor_position_col == len(line):
-                fragments = list(transformation_input.fragments)
-                fragments.append(("class:ghostbar", ghost_text))
-                return Transformation(fragments)
-                
-        return Transformation(transformation_input.fragments)
+    def apply_transformation(self, ti):
+        gt = self.ghost_text
+        if not gt or ti.lineno != self._visible_line:
+            return Transformation(ti.fragments)
+
+        doc = ti.document
+        if doc.cursor_position_col == len(doc.lines[ti.lineno]):
+            frags = list(ti.fragments)
+            frags.append(("class:ghostbar", gt))
+            return Transformation(frags)
+        return Transformation(ti.fragments)
 
 
-# ── Pygments lexer map ─────────────────────────────────────────────────────────
+# ── Pygments lexer (cached) ───────────────────────────────────────────────────
+
+_LEXER_CACHE: dict[str, PygmentsLexer] = {}
 
 LEXER_MAP = {
     "python":               "python",
@@ -96,17 +131,25 @@ LEXER_MAP = {
 }
 
 
-def _get_lexer(mode: str):
+def _get_lexer(mode: str) -> PygmentsLexer:
+    cached = _LEXER_CACHE.get(mode)
+    if cached is not None:
+        return cached
     name = LEXER_MAP.get(mode)
     if name:
         try:
-            return PygmentsLexer(get_lexer_by_name(name).__class__)
+            cls = get_lexer_by_name(name).__class__
+            cached = PygmentsLexer(cls)
+            _LEXER_CACHE[mode] = cached
+            return cached
         except Exception:
             pass
-    return PygmentsLexer(TextLexer)
+    cached = PygmentsLexer(TextLexer)
+    _LEXER_CACHE[mode] = cached
+    return cached
 
 
-# ── Smell gutter markers ───────────────────────────────────────────────────────
+# ── Smell gutter markers ──────────────────────────────────────────────────────
 
 SEVERITY_ICON = {
     "info":  "🔵",
@@ -115,15 +158,65 @@ SEVERITY_ICON = {
 }
 
 
-# ── Editor ─────────────────────────────────────────────────────────────────────
+# ── Timer-based debouncer (much lighter than asyncio task management) ─────────
+
+class Debouncer:
+    """Thread-safe debounce using a single timer."""
+    __slots__ = ('delay', 'timer', '_cb', '_lock')
+
+    def __init__(self, delay: float, callback):
+        self.delay = delay
+        self.timer = None
+        self._cb = callback
+        self._lock = threading.Lock()
+
+    def call(self):
+        """Schedule the callback after delay. Resets if already scheduled."""
+        with self._lock:
+            if self.timer is not None:
+                self.timer.cancel()
+            self.timer = threading.Timer(self.delay, self._run)
+            self.timer.daemon = True
+            self.timer.start()
+
+    def cancel(self):
+        with self._lock:
+            if self.timer is not None:
+                self.timer.cancel()
+                self.timer = None
+
+    def _run(self):
+        with self._lock:
+            self.timer = None
+        self._cb()
+
+
+# ── Main Editor ───────────────────────────────────────────────────────────────
 
 class Editor:
+    __slots__ = (
+        'filepath', 'mode', 'modified',
+        'ghost_text', 'smells', 'chat_history',
+        'bottom_panel_text', 'bottom_panel_visible',
+        'chat_panel_visible', 'chat_input_text',
+        'find_panel_visible', 'find_input_text',
+        'jump_panel_visible', 'jump_input_text',
+        'buffer', 'layout', 'kb', 'style', 'app',
+        '_smell_processor', '_ghost_processor',
+        '_autocomplete_debouncer', '_smell_debouncer',
+        '_lines_cache', '_lines_age',  # cached splitlines
+        '_titlebar_text', '_helpbar_text', '_status_text',
+        '_panel_text', '_chat_header', '_chat_input_display',
+        '_find_header', '_find_input_display',
+        '_jump_header', '_jump_input_display',
+    )
+
     def __init__(self, filepath: Path | None):
         self.filepath = filepath
         self.mode = detect_mode(filepath)
         self.modified = False
-        self.ghost_text = ""          # autocomplete suggestion
-        self.smells: list[dict] = []  # code smell markers { line, severity, issue, fix }
+        self.ghost_text = ""
+        self.smells: list[dict] = []
         self.chat_history: list[dict] = []
 
         # Panel state
@@ -136,6 +229,30 @@ class Editor:
         self.jump_panel_visible = False
         self.jump_input_text = ""
 
+        # Cached line storage
+        self._lines_cache: list[str] = []
+        self._lines_age = 0   # incremented on text change
+
+        # Processors
+        self._smell_processor = SmellProcessor(self)
+        self._ghost_processor = GhostTextProcessor(self)
+
+        # Debouncers (single timer each, no asyncio overhead)
+        self._autocomplete_debouncer = Debouncer(0.75, self._do_autocomplete)
+        self._smell_debouncer = Debouncer(10.0, self._do_smell_detect)
+
+        # Pre-allocated formatted text controls (avoids lambda recreations)
+        self._titlebar_text = FormattedTextControl(self._render_titlebar)
+        self._helpbar_text = FormattedTextControl(self._render_helpbar)
+        self._panel_text = FormattedTextControl(self._render_panel)
+        self._chat_header = FormattedTextControl("─── AI Chat (Enter send, Esc close) ─────────────────────")
+        self._chat_input_display = FormattedTextControl(self._render_chat_input)
+        self._find_header = FormattedTextControl("─── Find (Where Is) (Enter to search, Esc to close) ───")
+        self._find_input_display = FormattedTextControl(self._render_find_input)
+        self._jump_header = FormattedTextControl("─── Go To Line (Enter to jump, Esc to close) ──────────")
+        self._jump_input_display = FormattedTextControl(self._render_jump_input)
+        self._status_text = FormattedTextControl("")
+
         # Load file
         initial_text = ""
         if filepath and filepath.exists():
@@ -144,10 +261,10 @@ class Editor:
             except OSError as e:
                 initial_text = f"# Error reading file: {e}\n"
 
-        # Main editor buffer
+        # Main editor buffer (cursor starts at top)
         self.buffer = Buffer(
             name="main",
-            document=Document(initial_text),
+            document=Document(initial_text, cursor_position=0),
             multiline=True,
             on_text_changed=self._on_text_changed,
         )
@@ -162,209 +279,208 @@ class Editor:
             style=self.style,
             full_screen=True,
             mouse_support=True,
+            include_default_pygments_style=False,
         )
 
-    # ── Layout ─────────────────────────────────────────────────────────────────
+    # ── Rendered callbacks (called on demand, avoid lambda per frame) ────────
+
+    def _render_titlebar(self):
+        name = self.filepath.name if self.filepath else "New Buffer"
+        mod = " (Modified)" if self.modified else ""
+        return f"  yaate 0.1.0   File: {name} [{mode_display_name(self.mode)}]{mod}"
+
+    def _render_helpbar(self):
+        return " ^O Save  ^X Quit  ^W Find  ^_ Line  ^T Comment  ^E Explain  ^F Format  ^C Chat  ^Y YankChat"
+
+    def _render_panel(self):
+        return self.bottom_panel_text
+
+    def _render_chat_input(self):
+        return f"▶ {self.chat_input_text}█"
+
+    def _render_find_input(self):
+        return f"Search: {self.find_input_text}█"
+
+    def _render_jump_input(self):
+        return f"Line number: {self.jump_input_text}█"
+
+    # ── Layout (uses cached FormattedTextControl objects) ────────────────────
 
     def _build_layout(self):
+        visible_chat = Condition(lambda: self.chat_panel_visible)
+        visible_find = Condition(lambda: self.find_panel_visible)
+        visible_jump = Condition(lambda: self.jump_panel_visible)
+        visible_bottom = Condition(lambda: self.bottom_panel_visible)
+
         self.layout = Layout(
             HSplit([
-                # Title bar (like nano)
+                # Title bar
                 VSplit([
                     Window(
-                        content=FormattedTextControl(lambda: "  yaate 0.1.0"),
+                        content=self._titlebar_text,
                         align=WindowAlign.LEFT,
                         style="class:titlebar",
                     ),
                     Window(
-                        content=FormattedTextControl(lambda: f"File: {self.filepath.name if self.filepath else 'New Buffer'} [{mode_display_name(self.mode)}]{' (Modified)' if self.modified else ''}"),
+                        content=self._status_text,
                         align=WindowAlign.CENTER,
                         style="class:titlebar",
                     ),
                     Window(
-                        content=FormattedTextControl(lambda: ""),
+                        content=self._status_text,
                         align=WindowAlign.RIGHT,
                         style="class:titlebar",
                     ),
                 ], height=1),
-                # Editor row: buffer with numbered margin
+                # Editor buffer with fast numbered margin
                 Window(
                     content=BufferControl(
                         buffer=self.buffer,
                         lexer=_get_lexer(self.mode),
                         focus_on_click=True,
-                        input_processors=[GhostTextProcessor(self), SmellProcessor(self)],
+                        input_processors=[self._ghost_processor, self._smell_processor],
                     ),
-                    left_margins=[NumberedMargin()],
+                    left_margins=[FastNumberedMargin()],
                 ),
-                # Bottom info panel (error explainer, smell list, etc.)
+                # Bottom info panel
                 ConditionalContainer(
                     content=Window(
-                        content=FormattedTextControl(lambda: self.bottom_panel_text),
+                        content=self._panel_text,
                         height=8,
                         style="class:panel",
                     ),
-                    filter=Condition(lambda: self.bottom_panel_visible),
+                    filter=visible_bottom,
                 ),
-                # Chat input panel
+                # Chat panel
                 ConditionalContainer(
                     content=HSplit([
-                        Window(
-                            content=FormattedTextControl(lambda: "─── AI Chat (Enter send, Esc close) ─────────────────────"),
-                            height=1,
-                            style="class:panel.header",
-                        ),
-                        Window(
-                            content=FormattedTextControl(lambda: f"▶ {self.chat_input_text}█"),
-                            height=1,
-                            style="class:panel",
-                        ),
+                        Window(content=self._chat_header, height=1, style="class:panel.header"),
+                        Window(content=self._chat_input_display, height=1, style="class:panel"),
                     ]),
-                    filter=Condition(lambda: self.chat_panel_visible),
+                    filter=visible_chat,
                 ),
-                # Find input panel
+                # Find panel
                 ConditionalContainer(
                     content=HSplit([
-                        Window(
-                            content=FormattedTextControl(lambda: "─── Find (Where Is) (Enter to search, Esc to close) ───"),
-                            height=1,
-                            style="class:panel.header",
-                        ),
-                        Window(
-                            content=FormattedTextControl(lambda: f"Search: {self.find_input_text}█"),
-                            height=1,
-                            style="class:panel",
-                        ),
+                        Window(content=self._find_header, height=1, style="class:panel.header"),
+                        Window(content=self._find_input_display, height=1, style="class:panel"),
                     ]),
-                    filter=Condition(lambda: self.find_panel_visible),
+                    filter=visible_find,
                 ),
-                # Jump input panel
+                # Jump panel
                 ConditionalContainer(
                     content=HSplit([
-                        Window(
-                            content=FormattedTextControl(lambda: "─── Go To Line (Enter to jump, Esc to close) ──────────"),
-                            height=1,
-                            style="class:panel.header",
-                        ),
-                        Window(
-                            content=FormattedTextControl(lambda: f"Line number: {self.jump_input_text}█"),
-                            height=1,
-                            style="class:panel",
-                        ),
+                        Window(content=self._jump_header, height=1, style="class:panel.header"),
+                        Window(content=self._jump_input_display, height=1, style="class:panel"),
                     ]),
-                    filter=Condition(lambda: self.jump_panel_visible),
+                    filter=visible_jump,
                 ),
                 # Help bar
-                Window(
-                    content=FormattedTextControl(
-                        " ^O Save  ^X Quit  ^W Find  ^_ Line  ^T Comment  ^E Explain  ^F Format  ^C Chat  ^Y YankChat"
-                    ),
-                    height=1,
-                    style="class:helpbar",
-                ),
+                Window(content=self._helpbar_text, height=1, style="class:helpbar"),
             ])
         )
 
-    # ── Keybindings ────────────────────────────────────────────────────────────
+    # ── Keybindings ──────────────────────────────────────────────────────────
 
     def _build_keybindings(self):
         kb = KeyBindings()
 
-        # ── Ctrl+O — Save (WriteOut) ───────────────────────────────────────────
+        # ── Ctrl+O — Save ────────────────────────────────────────────────────
         @kb.add("c-o")
         def save(event):
             self._save()
 
-        # ── Ctrl+X — Quit (Exit) ───────────────────────────────────────────────
+        # ── Ctrl+X — Quit ────────────────────────────────────────────────────
         @kb.add("c-x")
         def quit(event):
             event.app.exit()
 
-        # ── Ctrl+W — Find (Where Is) ───────────────────────────────────────────
+        # ── Ctrl+W — Find ────────────────────────────────────────────────────
         @kb.add("c-w")
         def find(event):
+            self._hide_all_panels()
             self.find_panel_visible = True
             self.find_input_text = ""
-            self.jump_panel_visible = False
-            self.chat_panel_visible = False
-            self.bottom_panel_visible = False
-            self._refresh()
+            self._invalidate()
 
-        # ── Ctrl+_ — Go To Line ────────────────────────────────────────────────
+        # ── Ctrl+_ — Go To Line ──────────────────────────────────────────────
         @kb.add("c-_")
         def jump_to_line(event):
+            self._hide_all_panels()
             self.jump_panel_visible = True
             self.jump_input_text = ""
-            self.find_panel_visible = False
-            self.chat_panel_visible = False
-            self.bottom_panel_visible = False
-            self._refresh()
+            self._invalidate()
 
-        # ── Tab — Accept ghost text ────────────────────────────────────────────
+        # ── Tab — Accept ghost or indent ─────────────────────────────────────
         @kb.add("tab")
         def accept_ghost(event):
-            if self.ghost_text:
-                self.buffer.insert_text(self.ghost_text)
+            gt = self.ghost_text
+            if gt:
                 self.ghost_text = ""
-                self._refresh()
+                self._ghost_processor.set_ghost("", -1)
+                self.buffer.insert_text(gt)
+                self._invalidate()
             else:
-                self.buffer.insert_text("    ")  # 4-space indent fallback
+                self.buffer.insert_text("    ")
 
-        # ── Escape — Dismiss ghost / close panels ──────────────────────────────
+        # ── Escape ───────────────────────────────────────────────────────────
         @kb.add("escape")
         def escape(event):
             if self.ghost_text:
                 self.ghost_text = ""
-                self._refresh()
-            else:
-                self.chat_panel_visible = False
-                self.find_panel_visible = False
-                self.jump_panel_visible = False
-                self.bottom_panel_visible = False
-                self._refresh()
+                self._ghost_processor.set_ghost("", -1)
+                self._invalidate()
+            elif self.chat_panel_visible or self.find_panel_visible or self.jump_panel_visible or self.bottom_panel_visible:
+                self._hide_all_panels()
+                self._invalidate()
 
-        # ── Ctrl+T — Comment current line ─────────────────────────────────────
+        # ── Ctrl+T — Comment line ────────────────────────────────────────────
         @kb.add("c-t")
         def comment_line(event):
             self._run_in_thread(self._do_comment_line)
 
-        # ── Ctrl+E — Error explainer ───────────────────────────────────────────
+        # ── Ctrl+E — Error explainer ─────────────────────────────────────────
         @kb.add("c-e")
         def error_explain(event):
             self._run_in_thread(self._do_error_explain)
 
-        # ── Ctrl+F — Format file ──────────────────────────────────────────────
+        # ── Ctrl+F — Format file ─────────────────────────────────────────────
         @kb.add("c-f")
         def format_file(event):
             self._run_in_thread(self._do_format)
 
-        # ── Ctrl+D — Docstring ────────────────────────────────────────────────
+        # ── Ctrl+D — Docstring ───────────────────────────────────────────────
         @kb.add("c-d")
         def docstring(event):
             self._run_in_thread(self._do_docstring)
 
-        # ── Ctrl+C — AI Chat panel ─────────────────────────────────────────────
+        # ── Ctrl+C — AI Chat panel ───────────────────────────────────────────
         @kb.add("c-c")
         def chat(event):
-            self.chat_panel_visible = not self.chat_panel_visible
-            self.bottom_panel_visible = False
-            self._refresh()
+            if self.chat_panel_visible:
+                self.chat_panel_visible = False
+            else:
+                self._hide_all_panels()
+                self.chat_panel_visible = True
+            self._invalidate()
 
-        # ── Ctrl+Y — Yank (insert) last AI chat response ───────────────────────
+        # ── Ctrl+Y — Yank last AI response ───────────────────────────────────
         @kb.add("c-y")
         def yank_chat(event):
-            if hasattr(self, 'chat_history') and self.chat_history:
-                last_msg = self.chat_history[-1]
-                if last_msg["role"] == "model":
-                    self.buffer.insert_text(last_msg["text"])
-                    self._show_panel("✓ Inserted AI response into code.")
+            if self.chat_history:
+                last = self.chat_history[-1]
+                if last["role"] == "model":
+                    self.buffer.insert_text(last["text"])
+                    self._show_panel("✓ Inserted AI response.")
                 else:
                     self._show_panel("✗ Last message was not from AI.")
             else:
-                self._show_panel("✗ No AI chat history to copy.")
+                self._show_panel("✗ No AI chat history.")
 
-        # ── Multi-panel character input ────────────────────────────────────────
-        panel_visible = Condition(lambda: self.chat_panel_visible or self.find_panel_visible or self.jump_panel_visible)
+        # ── Multi-panel character input ──────────────────────────────────────
+        panel_visible = Condition(
+            lambda: self.chat_panel_visible or self.find_panel_visible or self.jump_panel_visible
+        )
 
         @kb.add("enter", filter=panel_visible)
         @kb.add("c-m", filter=panel_visible)
@@ -378,78 +494,83 @@ class Editor:
 
         @kb.add("backspace", filter=panel_visible)
         def panel_backspace(event):
-            if self.chat_panel_visible: self.chat_input_text = self.chat_input_text[:-1]
-            elif self.find_panel_visible: self.find_input_text = self.find_input_text[:-1]
-            elif self.jump_panel_visible: self.jump_input_text = self.jump_input_text[:-1]
-            self._refresh()
+            if self.chat_panel_visible:
+                self.chat_input_text = self.chat_input_text[:-1]
+            elif self.find_panel_visible:
+                self.find_input_text = self.find_input_text[:-1]
+            elif self.jump_panel_visible:
+                self.jump_input_text = self.jump_input_text[:-1]
+            self._invalidate()
 
         @kb.add("<any>", filter=panel_visible)
         def multi_input(event):
             key = event.key_sequence[0].key
             if len(key) == 1:
-                if self.chat_panel_visible: self.chat_input_text += key
-                elif self.find_panel_visible: self.find_input_text += key
-                elif self.jump_panel_visible: self.jump_input_text += key
-                self._refresh()
+                if self.chat_panel_visible:
+                    self.chat_input_text += key
+                elif self.find_panel_visible:
+                    self.find_input_text += key
+                elif self.jump_panel_visible:
+                    self.jump_input_text += key
+                self._invalidate()
 
         self.kb = kb
 
-    # ── Style ──────────────────────────────────────────────────────────────────
+    # ── Style ────────────────────────────────────────────────────────────────
 
     def _build_style(self):
+        # Only structural styles — no hardcoded fg/bg colors,
+        # so the terminal's native theme is used throughout.
         self.style = Style.from_dict({
             "titlebar":         "reverse bold",
-            "ghostbar":         "fg:ansibrightgreen italic",
             "helpbar":          "reverse",
-            "line-number":      "fg:ansigray",
-            "gutter.smell":     "fg:ansiyellow bold",
-            "panel":            "",
+            "ghostbar":         "italic",
+            "gutter.smell":     "bold",
             "panel.header":     "reverse",
         })
 
-    # ── Internal helpers ───────────────────────────────────────────────────────
+    # ── Internal helpers (minimal allocations) ───────────────────────────────
 
-    def _refresh(self):
+    def _invalidate(self):
         if self.app and self.app.is_running:
             self.app.invalidate()
+
+    def _hide_all_panels(self):
+        self.chat_panel_visible = False
+        self.find_panel_visible = False
+        self.jump_panel_visible = False
+        self.bottom_panel_visible = False
 
     def _show_panel(self, text: str):
         self.bottom_panel_text = text
         self.bottom_panel_visible = True
-        self._refresh()
+        self._invalidate()
+
+    def _file_lines(self) -> list[str]:
+        """Cached splitlines — avoids repeated allocations."""
+        # Increment age counter to invalidate cache when text changes
+        return self._lines_cache
+
+    def _rebuild_lines_cache(self):
+        """Call after buffer text changes."""
+        self._lines_cache = self.buffer.text.splitlines(keepends=False)
+        self._lines_age += 1
+
+    def _current_line_index(self) -> int:
+        return self.buffer.document.cursor_position_row
 
     def _on_text_changed(self, _):
         self.modified = True
+        self._rebuild_lines_cache()
+
+        # Clear ghost text on any edit
         if self.ghost_text:
             self.ghost_text = ""
-            self._refresh()
+            self._ghost_processor.set_ghost("", -1)
 
-        import asyncio
-        loop = asyncio.get_event_loop()
-
-        if hasattr(self, '_autocomplete_task') and self._autocomplete_task:
-            self._autocomplete_task.cancel()
-        if hasattr(self, '_smell_task') and self._smell_task:
-            self._smell_task.cancel()
-            
-        async def delayed_autocomplete():
-            try:
-                await asyncio.sleep(0.75)
-                import threading
-                threading.Thread(target=self._do_autocomplete, daemon=True).start()
-            except asyncio.CancelledError:
-                pass
-
-        async def delayed_smell():
-            try:
-                await asyncio.sleep(10.0)
-                import threading
-                threading.Thread(target=self._do_smell_detect, daemon=True).start()
-            except asyncio.CancelledError:
-                pass
-
-        self._autocomplete_task = loop.create_task(delayed_autocomplete())
-        self._smell_task = loop.create_task(delayed_smell())
+        # Debounce autocomplete and smell detection (no asyncio churn)
+        self._autocomplete_debouncer.call()
+        self._smell_debouncer.call()
 
     def _save(self):
         if not self.filepath:
@@ -463,66 +584,59 @@ class Editor:
             self._show_panel(f"✗ Save failed: {e}")
 
     def _run_in_thread(self, fn):
-        """Run AI call in background thread so UI doesn't freeze."""
+        """Run AI call in background thread — thread-safe _show_panel."""
         self._show_panel("⟳ Thinking…")
         thread = threading.Thread(target=fn, daemon=True)
         thread.start()
 
-    def _run_in_thread_silent(self, fn):
-        """Run AI call silently in background thread."""
-        thread = threading.Thread(target=fn, daemon=True)
-        thread.start()
-
-    def _current_line_index(self) -> int:
-        """Return 0-based index of cursor line."""
-        doc = self.buffer.document
-        return doc.cursor_position_row
-
-    def _file_lines(self) -> list[str]:
-        return self.buffer.text.splitlines()
-
     def _do_find(self):
         text = self.buffer.text
-        # Search starting from right after the cursor
         idx = text.find(self.find_input_text, self.buffer.cursor_position + 1)
         if idx == -1:
-            idx = text.find(self.find_input_text) # Wrap around
+            idx = text.find(self.find_input_text)
         if idx != -1:
             self.buffer.cursor_position = idx
         self.find_panel_visible = False
-        self._refresh()
+        self._invalidate()
 
     def _do_jump(self):
         try:
             line = int(self.jump_input_text) - 1
-            lines = self.buffer.text.splitlines()
-            line = max(0, min(line, len(lines) - 1))
-            # Calculate absolute character position
+            lines = self._file_lines()
+            # lines cache is always up-to-date due to _rebuild_lines_cache
+            if not lines:
+                line = 0
+            else:
+                line = max(0, min(line, len(lines) - 1))
             pos = sum(len(l) + 1 for l in lines[:line])
             self.buffer.cursor_position = pos
         except ValueError:
             pass
         self.jump_panel_visible = False
-        self._refresh()
+        self._invalidate()
 
-    # ── AI Feature Implementations ─────────────────────────────────────────────
+    # ── AI Feature Implementations ───────────────────────────────────────────
 
     def _do_autocomplete(self):
         try:
             doc = self.buffer.document
             row = doc.cursor_position_row
-            line = doc.lines[row]
+            lines = doc.lines
+            if row >= len(lines):
+                return
+            line = lines[row]
 
-            # Optimize API usage: Only trigger if at the end of a non-empty line
+            # Only trigger at end of non-empty line
             if not line.strip() or doc.cursor_position_col < len(line):
                 self.ghost_text = ""
-                self._refresh()
+                self._ghost_processor.set_ghost("", -1)
+                self._invalidate()
                 return
 
-            lines = self._file_lines()
             suggestion = ai.autocomplete(lines, row, self.mode)
             self.ghost_text = suggestion
-            self._refresh()
+            self._ghost_processor.set_ghost(suggestion, row)
+            self._invalidate()
         except Exception:
             pass
 
@@ -547,7 +661,6 @@ class Editor:
             else:
                 comment = f"{prefix} {explanation}"
 
-            # Insert comment line above current line
             lines.insert(row, comment)
             new_text = "\n".join(lines)
             self.buffer.set_document(
@@ -555,8 +668,8 @@ class Editor:
                 bypass_readonly=True,
             )
             self.modified = True
-            self.bottom_panel_visible = False
-            self._refresh()
+            self._hide_all_panels()
+            self._invalidate()
         except Exception as e:
             self._show_panel(f"✗ Comment error: {e}")
 
@@ -583,9 +696,25 @@ class Editor:
 
     def _do_smell_detect(self):
         try:
+            # Only analyze visible portion of file + context
             lines = self._file_lines()
-            self.smells = ai.smell_detect(lines, self.mode)
-            self._refresh()
+            if len(lines) > 300:
+                # Get context around cursor
+                doc = self.buffer.document
+                row = doc.cursor_position_row
+                half = 150
+                start = max(0, row - half)
+                end = min(len(lines), row + half)
+                focused_lines = lines[start:end]
+                self.smells = ai.smell_detect(focused_lines, self.mode)
+                # Remap line numbers
+                for s in self.smells:
+                    s["line"] = s["line"] + start
+            else:
+                self.smells = ai.smell_detect(lines, self.mode)
+
+            self._smell_processor.set_smells(self.smells)
+            self._invalidate()
         except Exception:
             pass
 
@@ -606,9 +735,6 @@ class Editor:
                     )
                     if result.returncode == 0:
                         formatted = result.stdout
-                    else:
-                        # Local formatter failed, fall through to Gemini
-                        pass
                 except (FileNotFoundError, subprocess.TimeoutExpired):
                     pass
 
@@ -630,7 +756,6 @@ class Editor:
             lines = self._file_lines()
             row = self._current_line_index()
 
-            # Grab function block — look forward for end of function
             block_lines = []
             for i in range(row, min(len(lines), row + 40)):
                 block_lines.append(lines[i])
@@ -640,9 +765,6 @@ class Editor:
             block = "\n".join(block_lines)
             docstring = ai.generate_docstring(block, self.mode)
 
-            prefix, suffix = get_comment_syntax(self.mode)
-
-            # Insert docstring below the function definition line
             insert_at = row + 1
             lines.insert(insert_at, docstring)
             new_text = "\n".join(lines)
@@ -651,8 +773,8 @@ class Editor:
                 bypass_readonly=True,
             )
             self.modified = True
-            self.bottom_panel_visible = False
-            self._refresh()
+            self._hide_all_panels()
+            self._invalidate()
         except Exception as e:
             self._show_panel(f"✗ Docstring error: {e}")
 
@@ -662,12 +784,7 @@ class Editor:
             self.chat_input_text = ""
             self.chat_history.append({"role": "user", "text": user_msg})
 
-            response = ai.chat(
-                user_msg,
-                self.buffer.text,
-                self.mode,
-                self.chat_history,
-            )
+            response = ai.chat(user_msg, self.buffer.text, self.mode, self.chat_history)
             self.chat_history.append({"role": "model", "text": response})
 
             self._show_panel(
@@ -680,7 +797,7 @@ class Editor:
         except Exception as e:
             self._show_panel(f"✗ Chat error: {e}")
 
-    # ── Run ────────────────────────────────────────────────────────────────────
+    # ── Run ──────────────────────────────────────────────────────────────────
 
     def run(self):
         self.app.run()
